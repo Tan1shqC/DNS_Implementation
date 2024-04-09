@@ -202,7 +202,22 @@ void test_res(char* res) {
                 num = (num << 1) | ((*ptr >> (31 - bit)) & 1);
             }
         }
-        printf("\t%d.%d.%d.%d\n", num >> 24, (num >> 16) & 255, (num >> 8) & 255, num & 255);
+        printf("\t%d.%d.%d.%d\n", num & 255, (num >> 8) & 255, (num >> 16) & 255, num >> 24);
+
+
+        printf("\033]8;;");
+
+        printf("%d.%d.%d.%d", num & 255, (num >> 8) & 255, (num >> 16) & 255, num >> 24);
+
+        printf("\007");
+
+        printf("https://%d.%d.%d.%d", num & 255, (num >> 8) & 255, (num >> 16) & 255, num >> 24);
+
+        printf("\033\\");
+
+        printf("\n");
+
+
         printf("\n");
     }
     printf("******************************\n");
