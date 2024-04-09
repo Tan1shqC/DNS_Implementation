@@ -69,7 +69,7 @@ int main() {
     ip->ihl = 5;
     ip->version = 4;
     ip->tos = 0;
-    ip->tot_len = sizeof(struct iphdr) + sizeof(struct dns_packet) + (10 + 4) + (12 + 4) + (9 + 4);
+    ip->tot_len = sizeof(struct iphdr) + sizeof(struct dns_packet);
     ip->id = 62500;
     ip->frag_off = 0;
     ip->ttl = 255;
@@ -87,7 +87,12 @@ int main() {
     // append query
     char* ptr = data + sizeof(struct dns_packet) + sizeof(struct iphdr);
     int nlines = 0;
-    read_from_file("domains.txt", ptr, 2048, &nlines);
+    int bytes_written = read_from_file("domains.txt", ptr, 2048, &nlines);
+    if(bytes_written < 0) {
+        fprintf(stderr, "Error: File too large\n");
+        exit(1);
+    }
+    ip->tot_len += bytes_written;
     header->n = nlines;
 
     test_req((char*) header);
@@ -98,7 +103,10 @@ int main() {
 
     char Res[2048];
     while(1) {
-        recv(sock_fd, Res, 2048, 0);
+        if(recv(sock_fd, Res, 2048, 0) < 0) {
+            perror("recv");
+            exit(1);
+        }
 
         // remove ip header
         struct iphdr* ip = (struct iphdr*)Res;
