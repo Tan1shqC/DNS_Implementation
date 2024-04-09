@@ -11,6 +11,7 @@
 #include <linux/if_packet.h>
 #include <netdb.h>
 #include <sys/types.h>
+#include <errno.h>
 
 #define IPPROTO_SDNS 254
 
@@ -38,64 +39,70 @@ struct dns_packet {
     If so creates a copy of the packet in data
     up to user to free the data
 */
-int check_packet(int fd, char** _data);
+int check_packet(int fd, char** data_addr);
 
-// handles the SDNS packet
-int handle_request(char** _data, int fd);
+/*
+    recieves a SDNS request packet
+    sends SDNS response packet along with IP header to file descriptor fd
+*/ 
+int handle_request(int fd, char* data);
 
-// converts hostname to ip
+/*
+    converts hostname to ip
+    return -1 for errors
+*/
 int hostname_to_ip(char * hostname , uint32_t* ip);
 
 // utility functions
-void print_ethernet_header(struct ethhdr* hdr);
 void print_ip_header(struct iphdr* hdr);
+void test_req(char* req);
 void test_res(char* res);
 void clear_bits(int *num, int r);
 
 int main(int argc, char* argv[]) {
-    int sock_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    int sock_fd = socket(AF_INET, SOCK_RAW, IPPROTO_SDNS);
     if (sock_fd < 0) {
         perror("socket");
         exit(1);
     }
+    int hdrincl_opt = 1;
+    if (setsockopt(sock_fd, IPPROTO_IP, IP_HDRINCL, &hdrincl_opt, sizeof(hdrincl_opt)) < 0) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
 
     while(1) {
-        char* data;
-        char** _data = &data;
-        if(check_packet(sock_fd, _data) == 0) {
+        char* frame;
+        if(check_packet(sock_fd, &frame) == 0) {
             // further process the SDNS packet
-            handle_request(_data, sock_fd);
-            fprintf(stderr, "LINE(%d) Handled Request\n", __LINE__);
-            free(*_data);
+            char* data = frame + sizeof(struct iphdr);
+            handle_request(sock_fd, data);
+            free(frame);
         }
     }
 }
 
-int check_packet(int fd, char** _data) {
+int check_packet(int fd, char** data_addr) {
     char* buf = (char*)malloc(2048 * sizeof(char));
-    recv(fd, buf, 2048, 0);
 
-    struct ethhdr* eth = (struct ethhdr*)buf;
-    struct iphdr* ip = (struct iphdr*)(buf + sizeof(struct ethhdr));
-    // print_ethernet_header(eth);
-    // print_ip_header(ip);
+    if(recv(fd, buf, 2048, 0) < 0) {
+        perror("recv");
+        exit(1);
+    }
 
-    char* data = buf + sizeof(struct ethhdr) + sizeof(struct iphdr);
-    if(ip->protocol == IPPROTO_SDNS) {
-        print_ethernet_header(eth);
+    struct iphdr* ip = (struct iphdr*)(buf);
+    struct dns_packet* dns = (struct dns_packet*)(buf + sizeof(struct iphdr));
+    if(ip->protocol == IPPROTO_SDNS && dns->type == 0) {
+        printf("SDNS Request packet received\n");
         print_ip_header(ip);
-        struct dns_packet* dns = (struct dns_packet*)data;
-        printf("ID: %d\tType: %d\tN: %d\n", dns->id, dns->type, dns->n);
-        printf("SDNS packet received\n");
-        *_data = data;
+        *data_addr = buf;
         return 0;
     }
     return -1;
 }
 
-int handle_request(char** _data, int fd) {
-    char* data = *_data;
-    test_res(data);
+int handle_request(int fd, char* data) {
+    test_req(data);
     struct dns_packet* req_header = (struct dns_packet*)data;
 
     if(req_header->type == 1) {
@@ -103,14 +110,8 @@ int handle_request(char** _data, int fd) {
         return -1;
     }
 
-    char* res = (char*)malloc(sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct dns_packet) + ((33 * req_header->n + (8 - 1)) / 8));
-    struct ethhdr* eth = (struct ethhdr*)res;
-    struct iphdr* ip = (struct iphdr*)(res + sizeof(struct ethhdr));
-
-    // construct ethernet header
-    eth->h_dest[0] = 0x00; eth->h_dest[1] = 0x00; eth->h_dest[2] = 0x00; eth->h_dest[3] = 0x00; eth->h_dest[4] = 0x00; eth->h_dest[5] = 0x00;
-    eth->h_source[0] = 0x00; eth->h_source[1] = 0x00; eth->h_source[2] = 0x00; eth->h_source[3] = 0x00; eth->h_source[4] = 0x00; eth->h_source[5] = 0x00;
-    eth->h_proto = 8;
+    char* res = (char*)malloc(sizeof(struct iphdr) + sizeof(struct dns_packet) + ((33 * req_header->n + (8 - 1)) / 8));
+    struct iphdr* ip = (struct iphdr*)(res);
 
     // construct ip header
     ip->version = 4;
@@ -125,7 +126,7 @@ int handle_request(char** _data, int fd) {
     ip->saddr = inet_addr("127.0.0.1");
     ip->daddr = inet_addr("127.0.0.1");
 
-    struct dns_packet* res_header = (struct dns_packet*) (res + sizeof(struct ethhdr) + sizeof(struct iphdr));
+    struct dns_packet* res_header = (struct dns_packet*) (res + sizeof(struct iphdr));
 
     res_header->id = req_header->id;
     res_header->type = 1;
@@ -133,10 +134,9 @@ int handle_request(char** _data, int fd) {
 
     // query
     char* ptr_req = data + sizeof(struct dns_packet);
-    char* ptr_res = res + sizeof(struct dns_packet) + sizeof(struct ethhdr) + sizeof(struct iphdr);
+    char* ptr_res = res + sizeof(struct dns_packet) + sizeof(struct iphdr);
     int offset = 0;
 
-    fprintf(stderr, "LINE(%d): Working here\n", __LINE__);
     for(int i = 0; i < req_header->n; ++i) {
         int domain_len = *(int*)ptr_req;
         ptr_req += sizeof(int);
@@ -191,32 +191,24 @@ int handle_request(char** _data, int fd) {
 
     // send the response
     test_res((char *) res_header);
-    fprintf(stderr, "LINE(%d): Sending response\n", __LINE__);
 
-    struct sockaddr_ll dest;
-    memset(&dest, 0, sizeof(struct sockaddr_ll));
-    dest.sll_family = AF_PACKET;
-    dest.sll_protocol = 8;
-    dest.sll_ifindex = if_nametoindex("lo");
-    dest.sll_halen = ETH_ALEN;
-    dest.sll_addr[0] = 0x00; dest.sll_addr[1] = 0x00; dest.sll_addr[2] = 0x00; dest.sll_addr[3] = 0x00; dest.sll_addr[4] = 0x00; dest.sll_addr[5] = 0x00;
+    struct sockaddr_in dest;
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(53);
+    dest.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    if(sendto(fd, res, sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct dns_packet) + ((33 * req_header->n + (8 - 1)) / 8), 0, (struct sockaddr*) &dest, sizeof(dest)) < 0) {
+    if(sendto(fd, res, sizeof(struct iphdr) + sizeof(struct dns_packet) + ((33 * req_header->n + (8 - 1)) / 8), 0, (struct sockaddr*) &dest, sizeof(dest)) < 0) {
         perror("send");
         exit(1);
     }
-    fprintf(stderr, "LINE(%d): Response sent\n", __LINE__);
     free(res);
-    fprintf(stderr, "LINE(%d): Response freed\n", __LINE__);
 }
 
-int hostname_to_ip(char * hostname , uint32_t* ip)
-{
+int hostname_to_ip(char * hostname , uint32_t* ip) {
 	struct hostent *he;
 	struct in_addr **addr_list;
-		
-	if ( (he = gethostbyname( hostname ) ) == NULL) 
-	{
+
+	if ( (he = gethostbyname( hostname ) ) == NULL)  {
 		// get the host info
 		herror("gethostbyname");
 		return -1;
@@ -224,8 +216,7 @@ int hostname_to_ip(char * hostname , uint32_t* ip)
 
 	addr_list = (struct in_addr **) he->h_addr_list;
 	
-	for(int i = 0; addr_list[i] != NULL; i++) 
-	{
+	for(int i = 0; addr_list[i] != NULL; i++)  {
 		//Return the first one;
         *ip = addr_list[i]->s_addr;
 		return EXIT_SUCCESS;
@@ -234,20 +225,8 @@ int hostname_to_ip(char * hostname , uint32_t* ip)
 	return 0;
 }
 
-void print_ethernet_header(struct ethhdr* hdr) {
-    printf("**********Ethernet Header**********\n");
-    printf("Destination MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           hdr->h_dest[0], hdr->h_dest[1], hdr->h_dest[2],
-           hdr->h_dest[3], hdr->h_dest[4], hdr->h_dest[5]);
-    printf("Source MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           hdr->h_source[0], hdr->h_source[1], hdr->h_source[2],
-           hdr->h_source[3], hdr->h_source[4], hdr->h_source[5]);
-    printf("Protocol: %d\n", hdr->h_proto);
-    printf("************************************\n");
-}
-
 void print_ip_header(struct iphdr* hdr) {
-    printf("**********IP Header**********\n");
+    printf("**********IP Header**********\n\n");
     printf("Version: %d\n", hdr->version);
     printf("IHL: %d\n", hdr->ihl);
     printf("TOS: %d\n", hdr->tos);
@@ -259,16 +238,17 @@ void print_ip_header(struct iphdr* hdr) {
     printf("Checksum: %d\n", hdr->check);
     printf("Source IP: %s\n", inet_ntoa(*(struct in_addr*)&hdr->saddr));
     printf("Destination IP: %s\n", inet_ntoa(*(struct in_addr*)&hdr->daddr));
-    printf("******************************\n");
+    printf("\n******************************\n");
 }
 
 void test_res(char* res) {
-    printf("Test response\n");
+    printf("*****SDNS Response Packet*****\n\n");
     struct dns_packet* res_header = (struct dns_packet*) res;
-    printf("ID: %d\tType: %d\tN: %d\n", res_header->id, res_header->type, res_header->n);
+    fprintf(stderr, "ID: %d\nType: %d\nN: %d\n\n", res_header->id, res_header->type, res_header->n);
 
     char* ptr_res = res + sizeof(struct dns_packet);
     for(int i = 0; i < res_header->n; ++i) {
+        uint32_t num = 0;
         for(int j = 0; j < 33; ++j) {
             if(j % 8 == 1) {
                 printf(" ");
@@ -280,12 +260,37 @@ void test_res(char* res) {
 
             int* ptr = (int *)(ptr_res) + curr_word;
             printf("%d", (*ptr >> (31 - bit)) & 1);
-            
+            if(j != 0) {
+                num = (num << 1) | ((*ptr >> (31 - bit)) & 1);
+            }
         }
+        printf("\t%d.%d.%d.%d\n", num >> 24, (num >> 16) & 255, (num >> 8) & 255, num & 255);
         printf("\n");
     }
+    printf("******************************\n");
 }
 
+void test_req(char* req) {
+    printf("******SDNS Request packet******\n\n");
+    struct dns_packet* req_header = (struct dns_packet*)req;
+    printf("ID: %d\nType: %d\nN: %d\n\n", req_header->id, req_header->type, req_header->n);
+
+    char* ptr_req = req + sizeof(struct dns_packet);
+    for(int i = 0; i < req_header->n; ++i) {
+        int domain_len = *(int*)ptr_req;
+        ptr_req += sizeof(int);
+        char *domain = (char *)malloc(sizeof(char) * domain_len + 1);
+
+        for(int j = 0; j < domain_len; ++j) {
+            domain[j] = *ptr_req;
+            ptr_req++;
+        }
+        domain[domain_len] = '\0';
+        printf("Domain: %s\n", domain);
+        free(domain);
+    }
+    printf("\n******************************\n");
+}
 
 // clears the last r bits from right
 void clear_bits(int *num, int r) {

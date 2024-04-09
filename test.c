@@ -193,52 +193,119 @@
 //     *num &= mask;
 // }
 
-void print_bits(int num) {
-    for(int i = 31; i >= 0; --i) {
-        printf("%d", (num >> i) & 1);
-        if(i % 8 == 0) {
-            printf(" ");
-        }
-    }
-    printf("\n");
-}
+// void print_bits(int num) {
+//     for(int i = 31; i >= 0; --i) {
+//         printf("%d", (num >> i) & 1);
+//         if(i % 8 == 0) {
+//             printf(" ");
+//         }
+//     }
+//     printf("\n");
+// }
 
-int hostname_to_ip(char * hostname , uint32_t* ip)
-{
-	struct hostent *he;
-	struct in_addr **addr_list;
+// int hostname_to_ip(char * hostname , uint32_t* ip)
+// {
+// 	struct hostent *he;
+// 	struct in_addr **addr_list;
 		
-	if ( (he = gethostbyname( hostname ) ) == NULL) 
-	{
-		// get the host info
-		herror("gethostbyname");
-		return -1;
-	}
+// 	if ( (he = gethostbyname( hostname ) ) == NULL) 
+// 	{
+// 		// get the host info
+// 		herror("gethostbyname");
+// 		return -1;
+// 	}
 
-	addr_list = (struct in_addr **) he->h_addr_list;
+// 	addr_list = (struct in_addr **) he->h_addr_list;
 	
-	for(int i = 0; addr_list[i] != NULL; i++) 
-	{
-		//Return the first one;
-        *ip = addr_list[i]->s_addr;
-        printf("hostname: %s\n", hostname);
-        print_bits(*ip);
-		// return EXIT_SUCCESS;
-	}
+// 	for(int i = 0; addr_list[i] != NULL; i++) 
+// 	{
+// 		//Return the first one;
+//         *ip = addr_list[i]->s_addr;
+//         printf("hostname: %s\n", hostname);
+//         print_bits(*ip);
+// 		// return EXIT_SUCCESS;
+// 	}
 	
-	return 0;
+// 	return 0;
+// }
+
+// int main() {
+//     char* domain = "google.com";
+//     uint32_t ip;
+//     hostname_to_ip(domain, &ip);
+
+//     for(int i = 4; i > 1; --i) {
+//         int l = i * 8;
+//         int r = (i - 1) * 8;
+
+//         printf("%d.", (ip >> r) & 0xFF);
+//     }
+//     printf("%d\n", ip & 0xFF);
+// }
+
+int read_from_file(const char* filepath, char* ptr, size_t size, int* nlines) {
+    FILE* file = fopen(filepath, "r");
+    if(file == NULL) {
+        perror("fopen");
+        return -1;
+    }
+
+    // read line by line until EOF or bytes read exceed size
+    int offset = 0;
+    char line[64];
+
+    while(fgets(line, sizeof(line), file) != NULL) {
+        int line_len = strlen(line);
+
+        if(line[line_len - 1] == '\n') {
+            line[line_len - 1] = '\0'; // remove newline character
+            line_len -= 1;
+        }
+
+        if(line_len + sizeof(int) > (size - 1) - offset + 1) {
+            return -1;
+        }
+
+        *(int*)(ptr) = line_len; // append length of line at the end
+        ptr += sizeof(int);
+
+        for(int i = 0; i < line_len; ++i) {
+            *ptr = line[i];
+            ptr++;
+        }
+
+        offset += line_len + sizeof(int);
+        *nlines += 1;
+    }
+
+    return offset;
 }
 
 int main() {
-    char* domain = "google.com";
-    uint32_t ip;
-    hostname_to_ip(domain, &ip);
-
-    for(int i = 4; i > 1; --i) {
-        int l = i * 8;
-        int r = (i - 1) * 8;
-
-        printf("%d.", (ip >> r) & 0xFF);
+    char* ptr = (char*)malloc(1024);
+    int nlines = 0;
+    int offset = read_from_file("domains.txt", ptr, 1024, &nlines);
+    if(offset == -1) {
+        printf("Buffer overflow\n");
+        return 1;
     }
-    printf("%d\n", ip & 0xFF);
+
+    char* ptr_req = ptr;
+    for(int i = 0; i < nlines; ++i) {
+        int domain_len = *(int*)ptr_req;
+        ptr_req += sizeof(int);
+        char *domain = (char *)malloc(sizeof(char) * domain_len + 1);
+        // printf("%d\n%s\n", domain_len, ptr_req);
+
+        for(int j = 0; j < domain_len; ++j) {
+            domain[j] = *ptr_req;
+            ptr_req++;
+        }
+        domain[domain_len] = '\0';
+        printf("Domain: %s\n", domain);
+        free(domain);
+    }
+
+    free(ptr);
+    return 0;
 }

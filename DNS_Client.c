@@ -8,6 +8,7 @@
 #include <netinet/ip.h>
 #include <netinet/if_ether.h>
 #include <net/ethernet.h>
+#include <linux/if_packet.h>
 #include <netdb.h>
 #include <sys/types.h>
 #include <errno.h>
@@ -32,6 +33,17 @@ struct dns_packet {
         following 32 bits describing ip addresses for query
     */
 };
+
+/*
+    Return total bytes written into ptr
+    -1 for errors
+*/
+int read_from_file(const char* filepath, char* ptr, size_t size, int* nlines);
+
+// utility functions
+void print_ip_header(struct iphdr* hdr);
+void test_req(char* req);
+void test_res(char* res);
 
 int main() {
     int sock_fd = socket(AF_INET, SOCK_RAW, IPPROTO_SDNS);
@@ -71,89 +83,141 @@ int main() {
     struct dns_packet* header = (struct dns_packet*)(data + sizeof(struct iphdr));
     header->id = 0x00;
     header->type = 0;
-    header->n = 3;
 
     // append query
-    int* ptr = (int*)(data + sizeof(struct dns_packet) + sizeof(struct iphdr));
-    *ptr = 10;
-    ptr += 1;
-    char* domain = (char *)ptr;
-    strcpy(domain, "google.com");
+    char* ptr = data + sizeof(struct dns_packet) + sizeof(struct iphdr);
+    int nlines = 0;
+    read_from_file("domains.txt", ptr, 2048, &nlines);
+    header->n = nlines;
 
-    ptr = (int *) (domain + strlen(domain));
-    *ptr = 12;
-    ptr += 1;
-    domain = (char *)ptr;
-    strcpy(domain, "facebook.com");
-
-    ptr = (int *) (domain + strlen(domain));
-    *ptr = 9;
-    ptr += 1;
-    domain = (char *)ptr;
-    strcpy(domain, "yahoo.com");
-
-    fprintf(stderr, "Sending packet of length %d\n", ip->tot_len);
+    test_req((char*) header);
     if(sendto(sock_fd, data, ip->tot_len, 0, (struct sockaddr*)&dest, sizeof(dest)) < 0) {
         perror("sendto");
         exit(1);
     }
-    fprintf(stderr, "Errno: %d\n", errno);
-    fprintf(stderr, "Packet sent\n");
 
     char Res[2048];
     while(1) {
-        fprintf(stderr, "Waiting for response\n");
         recv(sock_fd, Res, 2048, 0);
-        fprintf(stderr, "Response received\n");
 
         // remove ip header
         struct iphdr* ip = (struct iphdr*)Res;
-
-        // log ip header
-        fprintf(stderr, "************************************\n");
-        fprintf(stderr, "IP Header\n");
-        fprintf(stderr, "Version: %d\n", ip->version);
-        fprintf(stderr, "IHL: %d\n", ip->ihl);
-        fprintf(stderr, "TOS: %d\n", ip->tos);
-        fprintf(stderr, "Total Length: %d\n", ip->tot_len);
-        fprintf(stderr, "ID: %d\n", ip->id);
-        fprintf(stderr, "Frag Offset: %d\n", ip->frag_off);
-        fprintf(stderr, "TTL: %d\n", ip->ttl);
-        fprintf(stderr, "Protocol: %d\n", ip->protocol);
-        fprintf(stderr, "Checksum: %d\n", ip->check);
-        fprintf(stderr, "Source IP: %s\n", inet_ntoa(*(struct in_addr*)&ip->saddr));
-        fprintf(stderr, "Destination IP: %s\n", inet_ntoa(*(struct in_addr*)&ip->daddr));
-        fprintf(stderr, "************************************\n");
+        print_ip_header(ip);
 
         if(ip->protocol == IPPROTO_SDNS) {
+
             char* res = Res + sizeof(struct iphdr);
             // print the response
-            printf("Test response\n");
             struct dns_packet* res_header = (struct dns_packet*) res;
-            printf("ID: %d\tType: %d\tN: %d\n", res_header->id, res_header->type, res_header->n);
-
-            char* ptr_res = res + sizeof(struct dns_packet);
-            for(int i = 0; i < res_header->n; ++i) {
-                for(int j = 0; j < 33; ++j) {
-                    if(j % 8 == 1) {
-                        printf(" ");
-                    }
-
-                    int k = 33 * i + j;
-                    int curr_word = k / 32;
-                    int bit = k % 32;
-
-                    int* ptr = (int *)(ptr_res) + curr_word;
-                    printf("%d", (*ptr >> (31 - bit)) & 1);
-                    
-                }
-                printf("\n");
+            if(res_header->type == 1 && res_header->id == header->id) {
+                test_res(res);
+                break;
             }
-            // break;
-        }
-        else {
-            fprintf(stderr, "Received From IP: %s", inet_ntoa(*(struct in_addr*)&ip->saddr));
         }
     }
-    // recv(sock_fd, res, 2048, 0);
+}
+
+int read_from_file(const char* filepath, char* ptr, size_t size, int* nlines) {
+    FILE* file = fopen(filepath, "r");
+    if(file == NULL) {
+        perror("fopen");
+        return -1;
+    }
+
+    // read line by line until EOF or bytes read exceed size
+    int offset = 0;
+    char line[64];
+
+    while(fgets(line, sizeof(line), file) != NULL) {
+        int line_len = strlen(line);
+
+        if(line[line_len - 1] == '\n') {
+            line[line_len - 1] = '\0'; // remove newline character
+            line_len -= 1;
+        }
+
+        if(line_len + sizeof(int) > (size - 1) - offset + 1) {
+            return -1;
+        }
+
+        *(int*)(ptr) = line_len; // append length of line at the end
+        ptr += sizeof(int);
+
+        for(int i = 0; i < line_len; ++i) {
+            *ptr = line[i];
+            ptr++;
+        }
+
+        offset += line_len + sizeof(int);
+        *nlines += 1;
+    }
+
+    return offset;
+}
+
+void print_ip_header(struct iphdr* hdr) {
+    printf("**********IP Header**********\n\n");
+    printf("Version: %d\n", hdr->version);
+    printf("IHL: %d\n", hdr->ihl);
+    printf("TOS: %d\n", hdr->tos);
+    printf("Total Length: %d\n", hdr->tot_len);
+    printf("Identification: %d\n", hdr->id);
+    printf("Fragment Offset: %d\n", hdr->frag_off);
+    printf("TTL: %d\n", hdr->ttl);
+    printf("Protocol: %d\n", hdr->protocol);
+    printf("Checksum: %d\n", hdr->check);
+    printf("Source IP: %s\n", inet_ntoa(*(struct in_addr*)&hdr->saddr));
+    printf("Destination IP: %s\n", inet_ntoa(*(struct in_addr*)&hdr->daddr));
+    printf("\n******************************\n");
+}
+
+void test_res(char* res) {
+    printf("*****SDNS Response Packet*****\n\n");
+    struct dns_packet* res_header = (struct dns_packet*) res;
+    fprintf(stderr, "ID: %d\nType: %d\nN: %d\n\n", res_header->id, res_header->type, res_header->n);
+
+    char* ptr_res = res + sizeof(struct dns_packet);
+    for(int i = 0; i < res_header->n; ++i) {
+        uint32_t num = 0;
+        for(int j = 0; j < 33; ++j) {
+            if(j % 8 == 1) {
+                printf(" ");
+            }
+
+            int k = 33 * i + j;
+            int curr_word = k / 32;
+            int bit = k % 32;
+
+            int* ptr = (int *)(ptr_res) + curr_word;
+            printf("%d", (*ptr >> (31 - bit)) & 1);
+            if(j != 0) {
+                num = (num << 1) | ((*ptr >> (31 - bit)) & 1);
+            }
+        }
+        printf("\t%d.%d.%d.%d\n", num >> 24, (num >> 16) & 255, (num >> 8) & 255, num & 255);
+        printf("\n");
+    }
+    printf("******************************\n");
+}
+
+void test_req(char* req) {
+    printf("******SDNS Request packet******\n\n");
+    struct dns_packet* req_header = (struct dns_packet*)req;
+    printf("ID: %d\nType: %d\nN: %d\n\n", req_header->id, req_header->type, req_header->n);
+
+    char* ptr_req = req + sizeof(struct dns_packet);
+    for(int i = 0; i < req_header->n; ++i) {
+        int domain_len = *(int*)ptr_req;
+        ptr_req += sizeof(int);
+        char *domain = (char *)malloc(sizeof(char) * domain_len + 1);
+
+        for(int j = 0; j < domain_len; ++j) {
+            domain[j] = *ptr_req;
+            ptr_req++;
+        }
+        domain[domain_len] = '\0';
+        printf("Domain: %s\n", domain);
+        free(domain);
+    }
+    printf("\n******************************\n");
 }
